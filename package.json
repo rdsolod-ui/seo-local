@@ -1,0 +1,10 @@
+{
+  "name": "seo-local",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted SEO audits with offline Schema.org and local Lighthouse",
+  "license": "MIT",
+  "engines": {"node": ">=22.19"},
+  "dependencies": {"lighthouse": "13.5.0", "chrome-launcher": "1.2.2"}
+}
