@@ -3,6 +3,7 @@ import json
 import mimetypes
 import secrets
 import threading
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -13,24 +14,26 @@ from .reports import export_csv, export_html, parse_search_console
 from .storage import Store
 from .schema import validate as validate_schema
 from .lighthouse import Lighthouse
+from .connections import Connections
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def make_server(port, data_dir, allow_loopback=False, public_origin=None):
+def make_server(port, data_dir, allow_loopback=False, public_origin=None, public_base_url=None):
     store = Store(Path(data_dir) / "seo.sqlite3")
     engine = Engine(store, allow_loopback)
     token = secrets.token_urlsafe(32)
     lighthouse = Lighthouse(data_dir)
+    connections = Connections(data_dir, store, public_base_url or ((public_origin.rstrip("/") + "/seo-local/") if public_origin else f"http://127.0.0.1:{port}/"))
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "SEOLocal/0.3"
+        server_version = "SEOLocal/0.4"
         timeout = 20
 
         def log_message(self, fmt, *args):
             pass
 
-        def send(self, value, code=200, content_type="application/json; charset=utf-8", filename=None):
+        def send(self, value, code=200, content_type="application/json; charset=utf-8", filename=None, headers=None):
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False)
             if isinstance(value, str):
@@ -42,12 +45,14 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            for key, val in (headers or {}).items():
+                self.send_header(key, val)
             if filename:
                 self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
             self.wfile.write(value)
 
-        def safe_request(self, write=False):
+        def safe_request(self, write=False, callback=False):
             allowed = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
             host = self.headers.get("Host", "")
             if host not in allowed:
@@ -57,7 +62,7 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
             if origin and origin not in {"http://" + h for h in allowed} | ({public_origin} if public_origin else set()):
                 self.send({"error": "Запрос с другого сайта запрещён"}, 403)
                 return False
-            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" and not callback:
                 self.send({"error": "Межсайтовый запрос запрещён"}, 403)
                 return False
             if write and not secrets.compare_digest(self.headers.get("X-SEO-Token", ""), token):
@@ -66,13 +71,27 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
             return True
 
         def do_GET(self):
-            if not self.safe_request():
-                return
             path = urlsplit(self.path).path
+            callback = path in ('/api/oauth/google/callback', '/api/oauth/yandex/callback')
+            if not self.safe_request(callback=callback):
+                return
             query = parse_qs(urlsplit(self.path).query)
             try:
-                if path == "/api/health":
-                    self.send({"app": "SEO Local", "version": "0.3.0", "paid_services": False})
+                if callback:
+                    key = path.split('/')[3]
+                    cookie = SimpleCookie()
+                    try:
+                        cookie.load(self.headers.get('Cookie', ''))
+                        value = cookie.get('seo_oauth_'+key)
+                        connections.callback(key, query.get('state',[''])[0], value.value if value else '', query.get('code',[''])[0], bool(query.get('error')))
+                        result = 'connected'
+                    except (ValueError, KeyError, TypeError):
+                        result = 'failed'
+                    self.send('', 303, headers={'Location':connections.base+'?connection='+key+'&result='+result+'#connections', 'Set-Cookie':self.oauth_cookie(key,'',clear=True)})
+                elif path == '/api/connections':
+                    self.send(connections.status())
+                elif path == "/api/health":
+                    self.send({"app": "SEO Local", "version": "0.4.0", "paid_services": False})
                 elif path == "/api/session":
                     self.send({"token": token, "hosted": bool(public_origin), "lighthouse": lighthouse.capability()})
                 elif path == "/api/lighthouse":
@@ -100,7 +119,7 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
                         self.send(run, filename=f"seo-{run['id'][:8]}.json")
                     else:
                         self.send(export_html(run, store.project(run["project_id"])), content_type="text/html; charset=utf-8", filename=f"seo-{run['id'][:8]}.html")
-                elif path in ("/", "/app.js", "/style.css", "/motion.js"):
+                elif path in ("/", "/app.js", "/style.css", "/motion.js", "/connections.js"):
                     file = ROOT / "web" / ("index.html" if path == "/" else path[1:])
                     self.send(file.read_bytes(), content_type=(mimetypes.guess_type(file)[0] or "text/plain") + "; charset=utf-8")
                 elif path.startswith('/assets/') and path[8:] in {p.name for p in (ROOT / 'web' / 'assets').iterdir() if p.is_file()}:
@@ -112,6 +131,10 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
                 self.send({"error": str(exc)}, 400)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+        def oauth_cookie(self, key, value, clear=False):
+            path = urlsplit(connections.base).path
+            return f'seo_oauth_{key}={value}; Path={path}; Max-Age={0 if clear else 600}; HttpOnly; SameSite=Lax' + ('; Secure' if connections.base.startswith('https:') else '')
 
         def do_POST(self):
             if not self.safe_request(write=True):
@@ -126,7 +149,18 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
                 if not isinstance(data, dict):
                     raise ValueError("Нужен JSON-объект")
                 path = urlsplit(self.path).path
-                if path == '/api/schema':
+                if path == '/api/connections/configure':
+                    self.send(connections.configure(data['provider'], data['client_id'], data['client_secret']))
+                elif path == '/api/connections/start':
+                    url, cookie = connections.begin(data['provider'])
+                    self.send({'url':url}, headers={'Set-Cookie':self.oauth_cookie(data['provider'],cookie)})
+                elif path == '/api/connections/sites':
+                    self.send(connections.sites(data['provider']))
+                elif path == '/api/connections/sync':
+                    self.send(connections.sync(data['provider'],data['project'],data['site'],data['start'],data['end']))
+                elif path == '/api/connections/disconnect':
+                    self.send(connections.disconnect(data['provider']))
+                elif path == '/api/schema':
                     self.send(validate_schema(data['text']))
                 elif path == '/api/lighthouse/start':
                     self.send({'id': lighthouse.start(data['url'], data.get('mode', 'mobile'))}, 201)
@@ -161,6 +195,9 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
                 self.send({"error": str(exc)}, 400)
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if not public_origin and not public_base_url:
+        connections.base = f"http://127.0.0.1:{server.server_port}/"
+    server.connections = connections
     server.store = store
     server.engine = engine
     return server
@@ -172,8 +209,9 @@ def main():
     parser.add_argument("--data-dir", default=str(ROOT / "data"))
     parser.add_argument('--public-origin', help='HTTPS origin behind an authenticated reverse proxy; upstream Host remains loopback')
     parser.add_argument("--allow-loopback-fixture", action="store_true", help="Только для локальных тестов, не для обычного использования")
+    parser.add_argument("--public-base-url", help="Trusted external application URL including subdirectory, for OAuth callbacks")
     args = parser.parse_args()
-    server = make_server(args.port, args.data_dir, args.allow_loopback_fixture, args.public_origin)
+    server = make_server(args.port, args.data_dir, args.allow_loopback_fixture, args.public_origin, args.public_base_url)
     server.store.recover()
     print(f"SEO Local: http://127.0.0.1:{server.server_port}", flush=True)
     try:

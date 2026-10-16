@@ -55,6 +55,59 @@ contexts are explicitly marked unchecked. Domain/range findings are advisory;
 Schema.org has no universal required properties. Rich results and indexing
 are not guaranteed. No ranking/backlink database or paid provider is included.
 
+## Google Search Console and Yandex Webmaster
+
+Open **Подключения поисковых кабинетов** in the app. Enter your own OAuth Web
+application Client ID and Client Secret, then authorize in the provider's page.
+Credentials are never returned to the browser after saving. Use only these scopes:
+
+- Google: `https://www.googleapis.com/auth/webmasters.readonly`; enable Search
+  Console API and configure the consent audience/test users in Google Cloud.
+- Yandex: `webmaster:hostinfo`; configure a Web services OAuth application.
+
+Copy the exact Redirect URI shown in each card into the corresponding provider's
+application settings. The default local URLs use `http://127.0.0.1:8765/` and
+`api/oauth/google/callback` or `api/oauth/yandex/callback`. Open the app at the same
+host as its callback. For a reverse proxy, set `--public-base-url` to the complete
+HTTPS URL including its subdirectory (e.g. `https://example.org/seo-local/`).
+With `--public-origin` alone, the backwards-compatible default prefix is `/seo-local/`.
+Use separate OAuth clients for separate installations where appropriate.
+
+After authorization: select your project, fetch the site list, explicitly choose
+the matching verified property and dates, then load data. Google domain properties
+and URL-prefix properties are supported. One request stores up to 1000 Google query
+rows or 500 Yandex popular queries. Dates may be adjusted by Yandex; both requested
+and actual periods are saved. Google uses final web data and PT date boundaries.
+No pagination claim: these are bounded top-query samples, not complete site totals.
+Missing metrics stay null. Reports persist in project history and download as JSON.
+No background schedule or automatic account writes are performed.
+
+This is still one shared owner workspace, with one account per provider. All users
+who know the reverse-proxy password can manage these connections. OAuth uses PKCE,
+one-use expiring state and a browser-bound HttpOnly/SameSite=Lax cookie. Provider
+requests use fixed HTTPS hosts, reject redirects and have bounded time/size limits.
+Refresh tokens are updated server-side. If consent is revoked or a Google Testing
+refresh token expires (typically seven days), reconnect in the app.
+
+Secrets live in `data/connections-private/`, separate from SQLite/report backups.
+Windows uses current-user DPAPI; Linux uses directory 0700/file 0600 permissions,
+not application-level encryption. Administrators/root can access server secrets.
+Keep this directory out of source archives. Disconnect removes local settings and
+tokens and retains reports; revoke the provider-side grant separately in your account.
+
+**Reverse proxy:** protect callbacks with the same authentication as the rest of
+the app. Disable access logging and request-bearing error logging for the two exact
+callback paths to avoid logging authorization codes. Do not log POST bodies. Keep
+all other app/API routes protected. No credentials are needed for unit tests:
+provider responses are fixtures, clearly distinct from real account authorization.
+
+Sources: [Google pricing](https://developers.google.com/webmaster-tools/pricing),
+[Google OAuth](https://developers.google.com/identity/protocols/oauth2/web-server),
+[Search Analytics](https://developers.google.com/webmaster-tools/v1/searchanalytics/query),
+[Yandex OAuth](https://yandex.ru/dev/id/doc/ru/codes/code-url),
+[Yandex popular queries](https://yandex.com/dev/webmaster/doc/ru/reference/host-search-queries-popular).
+The app has no paid SEO API or credit system; provider quotas and your hosting costs remain.
+
 ## Self-hosting
 
 Run as an unprivileged user, bound to loopback, behind an authenticated HTTPS

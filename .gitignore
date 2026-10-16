@@ -19,3 +19,4 @@ scripts/deploy-*.sh
 tests/browser-check.cjs
 tests/touch-check.cjs
 tests/live-check.py
+connections-private/
