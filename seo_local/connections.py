@@ -94,7 +94,7 @@ class Connections:
     def status(self):
         with self.lock:
             data=self.secrets.read()
-            return [{'provider':key,'name':p['name'],'configured':bool(data.get(key,{}).get('client_id')),'connected':bool(data.get(key,{}).get('token')),'redirect_uri':self.redirect(key),'scope':p['scope']} for key,p in PROVIDERS.items()]
+            return [{'provider':key,'name':p['name'],'configured':bool(data.get(key,{}).get('client_id')),'connected':bool(data.get(key,{}).get('token')),'redirect_uri':('https://oauth.yandex.ru/verification_code' if key=='yandex' else self.redirect(key)),'scope':p['scope']} for key,p in PROVIDERS.items()]
 
     def configure(self,key,client_id,client_secret):
         self.provider(key)
@@ -105,30 +105,32 @@ class Connections:
             self.pending={s:v for s,v in self.pending.items() if v['provider']!=key};self.sites_cache.pop(key,None)
         return {'message':'Настройки сохранены. Теперь подключите аккаунт.'}
 
-    def begin(self,key):
+    def begin(self,key,manual=False):
         p=self.provider(key)
+        if manual and key!='yandex': raise ValueError('Ввод кода поддерживается только для Яндекса')
         with self.lock:
             c=self.secrets.read().get(key,{})
             if not c.get('client_id'): raise ValueError('Сначала сохраните настройки OAuth-приложения')
             self.pending={s:v for s,v in self.pending.items() if v['expires']>time.time()}
             if len(self.pending)>=20: raise ValueError('Слишком много попыток входа. Подождите 10 минут.')
             state,cookie,verifier=secrets.token_urlsafe(32),secrets.token_urlsafe(32),secrets.token_urlsafe(48)
-            self.pending[state]={'provider':key,'cookie':cookie,'verifier':verifier,'expires':time.time()+600}
-            params={'client_id':c['client_id'],'redirect_uri':self.redirect(key),'response_type':'code','scope':p['scope'],'state':state,'code_challenge':base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode(),'code_challenge_method':'S256'}
+            redirect='https://oauth.yandex.ru/verification_code' if manual else self.redirect(key)
+            self.pending[state]={'provider':key,'cookie':cookie,'verifier':verifier,'expires':time.time()+600,'manual':manual,'redirect':redirect}
+            params={'client_id':c['client_id'],'redirect_uri':redirect,'response_type':'code','scope':p['scope'],'state':state,'code_challenge':base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode(),'code_challenge_method':'S256'}
             params.update({'access_type':'offline','prompt':'consent'} if key=='google' else {'force_confirm':'yes'})
             return p['auth']+'?'+urlencode(params),cookie
 
-    def callback(self,key,state,cookie,code,error=False):
+    def callback(self,key,state,cookie,code,error=False,manual=False):
         p=self.provider(key)
         with self.lock:
             pending=self.pending.get(state)
-            if not pending or pending['provider']!=key or pending['expires']<time.time() or not secrets.compare_digest(pending['cookie'],cookie or ''):
+            if not pending or pending['provider']!=key or pending.get('manual',False)!=manual or pending['expires']<time.time() or not secrets.compare_digest(pending['cookie'],cookie or ''):
                 raise ValueError('Вход устарел или открыт в другом браузере. Начните подключение заново.')
             self.pending.pop(state)
             if error: raise ValueError('Доступ не предоставлен. Можно повторить подключение.')
             if not isinstance(code,str) or not 1<=len(code)<=4096: raise ValueError('Код авторизации отсутствует')
             data=self.secrets.read();c=data[key]
-            form={'grant_type':'authorization_code','code':code,'client_id':c['client_id'],'client_secret':c['client_secret'],'redirect_uri':self.redirect(key),'code_verifier':pending['verifier']}
+            form={'grant_type':'authorization_code','code':code,'client_id':c['client_id'],'client_secret':c['client_secret'],'redirect_uri':pending.get('redirect',self.redirect(key)),'code_verifier':pending['verifier']}
             result=self.transport(p['token'],form=form)
             # Reauthorization never reuses a different account's old refresh token.
             c['token']=self.token_value(result,{})

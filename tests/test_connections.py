@@ -47,6 +47,20 @@ class ConnectionTests(unittest.TestCase):
  def test_refresh_and_report_persistence(self):
   self.connect();data=self.c.secrets.read();data['google']['token']['expires_at']=0;self.c.secrets.write(data);sites=self.c.sites('google');self.assertEqual(self.fake.token_count,2)
   r=self.c.sync('google',self.p['id'],sites[0]['id'],'2026-09-01','2026-09-07');self.assertEqual(r['summary']['position'],7);self.assertEqual(r['summary']['ctr'],.1);self.assertEqual(self.store.imports(self.p['id'])[0]['source'],'google');self.assertIn('sc-domain%3Aexample.com',self.fake.calls[-1][0]);self.assertEqual(self.fake.calls[-1][1]['payload']['dataState'],'final')
+ def test_manual_yandex_binding_pkce_single_use(self):
+  self.c.configure('yandex','id','secret');url,cookie=self.c.begin('yandex',manual=True);q=parse_qs(urlsplit(url).query);state=q['state'][0]
+  self.assertEqual(q['redirect_uri'],['https://oauth.yandex.ru/verification_code'])
+  for binding,manual in [('wrong',True),(cookie,False)]:
+   with self.assertRaises(ValueError):self.c.callback('yandex',state,binding,'code',manual=manual)
+  self.assertEqual(self.fake.calls,[])
+  self.c.callback('yandex',state,cookie,'code',manual=True)
+  form=self.fake.calls[-1][1]['form'];self.assertEqual(form['redirect_uri'],q['redirect_uri'][0]);self.assertTrue(form['code_verifier'])
+  with self.assertRaises(ValueError):self.c.callback('yandex',state,cookie,'code',manual=True)
+  with self.assertRaises(ValueError):self.c.begin('google',manual=True)
+ def test_manual_yandex_expiry(self):
+  self.c.configure('yandex','id','secret');url,cookie=self.c.begin('yandex',manual=True);state=parse_qs(urlsplit(url).query)['state'][0];self.c.pending[state]['expires']=0
+  with self.assertRaises(ValueError):self.c.callback('yandex',state,cookie,'code',manual=True)
+  self.assertEqual(self.fake.calls,[])
  def test_yandex_actual_dates_missing_not_zero(self):
   self.connect('yandex');sites=self.c.sites('yandex');r=self.c.sync('yandex',self.p['id'],sites[0]['id'],'2026-09-01','2026-09-07');self.assertEqual(r['start'],'2026-09-02');self.assertEqual(r['requested_start'],'2026-09-01');self.assertIsNone(r['summary']['clicks']);self.assertIsNone(r['summary']['ctr']);self.assertEqual(r['summary']['impressions'],50)
   self.assertEqual(parse_qs(urlsplit(self.fake.calls[-1][0]).query)['query_indicator'],['TOTAL_SHOWS','TOTAL_CLICKS','AVG_SHOW_POSITION'])
@@ -88,6 +102,20 @@ class ConnectionTests(unittest.TestCase):
    except HTTPError as e:self.assertEqual(e.code,303);self.assertIn('result=connected',e.headers['Location']);self.assertNotIn('code=',e.headers['Location'])
    self.assertTrue(get('/api/connections')[0]['connected'])
    with self.assertRaises(HTTPError):urlopen(Request(base+'/api/connections',headers={'Sec-Fetch-Site':'cross-site'}))
+   navigation={'Sec-Fetch-Site':'cross-site','Sec-Fetch-Mode':'navigate','Sec-Fetch-Dest':'document'}
+   with urlopen(Request(base+'/?connection=google&result=connected',headers=navigation)) as r:self.assertEqual(r.status,200)
+   for path in ['/api/session','/api/connections']:
+    with self.assertRaises(HTTPError):urlopen(Request(base+path,headers=navigation))
+   with self.assertRaises(HTTPError):urlopen(Request(base+'/',headers={**navigation,'Sec-Fetch-Dest':'iframe'}))
+   post('/api/connections/configure',{'provider':'yandex','client_id':'id','client_secret':'secret'}).close()
+   with post('/api/connections/yandex/code/start',{}) as r:
+    manual_cookie=r.headers['Set-Cookie'].split(';')[0];manual=json.load(r)
+   data={'state':manual['state'],'code':'fixture-code'}
+   with self.assertRaises(HTTPError):post('/api/connections/yandex/code/complete',data)
+   headers={'Content-Type':'application/json','X-SEO-Token':token,'Cookie':manual_cookie}
+   with urlopen(Request(base+'/api/connections/yandex/code/complete',data=json.dumps(data).encode(),headers=headers)) as r:
+    self.assertIn('Max-Age=0',r.headers['Set-Cookie'])
+   self.assertTrue(get('/api/connections')[1]['connected'])
   finally:server.shutdown();thread.join();server.server_close()
 
 if __name__=='__main__':unittest.main()

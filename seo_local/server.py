@@ -62,7 +62,13 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None, public
             if origin and origin not in {"http://" + h for h in allowed} | ({public_origin} if public_origin else set()):
                 self.send({"error": "Запрос с другого сайта запрещён"}, 403)
                 return False
-            if self.headers.get("Sec-Fetch-Site") == "cross-site" and not callback:
+            # The public UI shell carries no account data. Allow only top-level
+            # navigation to it (including the final OAuth redirect), never APIs.
+            document_navigation = (not write and self.command == 'GET' and
+                urlsplit(self.path).path == '/' and
+                self.headers.get('Sec-Fetch-Mode') == 'navigate' and
+                self.headers.get('Sec-Fetch-Dest') == 'document')
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" and not callback and not document_navigation:
                 self.send({"error": "Межсайтовый запрос запрещён"}, 403)
                 return False
             if write and not secrets.compare_digest(self.headers.get("X-SEO-Token", ""), token):
@@ -154,6 +160,16 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None, public
                 elif path == '/api/connections/start':
                     url, cookie = connections.begin(data['provider'])
                     self.send({'url':url}, headers={'Set-Cookie':self.oauth_cookie(data['provider'],cookie)})
+                elif path == '/api/connections/yandex/code/start':
+                    url, cookie = connections.begin('yandex',manual=True)
+                    state = parse_qs(urlsplit(url).query)['state'][0]
+                    self.send({'url':url,'state':state}, headers={'Set-Cookie':self.oauth_cookie('yandex',cookie)})
+                elif path == '/api/connections/yandex/code/complete':
+                    cookie = SimpleCookie()
+                    cookie.load(self.headers.get('Cookie',''))
+                    binding = cookie.get('seo_oauth_yandex')
+                    result = connections.callback('yandex',data['state'],binding.value if binding else '',data['code'],manual=True)
+                    self.send(result, headers={'Set-Cookie':self.oauth_cookie('yandex','',clear=True)})
                 elif path == '/api/connections/sites':
                     self.send(connections.sites(data['provider']))
                 elif path == '/api/connections/sync':
