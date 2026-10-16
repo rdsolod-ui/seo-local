@@ -25,3 +25,9 @@ https://github.com/GoogleChrome/chrome-launcher.
 All resolved dependencies are pinned in package-lock.json; their license
 files are included when npm installs them. Chrome is separately installed
 software, not redistributed in this repository.
+
+## Interface assets (0.3)
+
+- GSAP 3.15.0: https://gsap.com/standard-license/ — Standard no-charge license (not MIT). Vendored dist/gsap.min.js from the pinned npm package; license header preserved.
+- Unbounded and Manrope variable fonts from @fontsource-variable 5.3.0, Cyrillic and Latin subsets, SIL Open Font License 1.1. License files in web/assets. Sources: https://fontsource.org/fonts/unbounded and https://fontsource.org/fonts/manrope.
+- Scanner illustration is original CSS; no gallery images are distributed.

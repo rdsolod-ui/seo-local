@@ -16,6 +16,7 @@ class PageParser(HTMLParser):
         self.h1 = []
         self.description = ""
         self.canonicals = []
+        self.alternates = []
         self.robots = []
         self.links = []
         self.images_without_alt = []
@@ -57,6 +58,8 @@ class PageParser(HTMLParser):
                 self.viewport = content
         if tag == "link" and "canonical" in (a.get("rel") or "").lower().split():
             self.canonicals.append(a.get("href") or "")
+        if tag == 'link' and 'alternate' in (a.get('rel') or '').lower().split() and 'hreflang' in a:
+            self.alternates.append({'lang': (a.get('hreflang') or '').lower(), 'href': a.get('href') or ''})
         if tag == "a" and a.get("href"):
             self.links.append({"href": a["href"], "nofollow": "nofollow" in (a.get("rel") or "").lower().split()})
         if tag == "img" and "alt" not in a:
@@ -113,6 +116,7 @@ def analyze(response, site_origin):
     page["description"] = clean(parser.description)
     page["h1"] = [clean(" ".join(h)) for h in parser.h1]
     page["canonical"] = []
+    page['hreflang'] = []
     page["word_count"] = len(clean(" ".join(parser.text)).split())
     page["content_hash"] = hashlib.sha256(clean(" ".join(parser.text)).encode()).hexdigest()
     page["robots"] = ", ".join(parser.robots + [page.get("headers", {}).get("x-robots-tag", "")]).strip(", ")
@@ -135,6 +139,8 @@ def analyze(response, site_origin):
     base = urljoin(page["final_url"], parser.base) if parser.base else page["final_url"]
     for c in parser.canonicals:
         try:
+            if not c.strip():
+                raise ValueError('Empty canonical')
             page["canonical"].append(normalize_url(urljoin(base, c)))
         except ValueError:
             issue("canonical_invalid", "warning", "Некорректный canonical", c, "Укажите корректный URL канонической страницы.")
@@ -142,6 +148,16 @@ def analyze(response, site_origin):
         issue("canonical_multiple", "warning", "Несколько canonical", str(page["canonical"]), "Оставьте одну согласованную каноническую ссылку.")
     if not parser.canonicals:
         issue("canonical_missing", "info", "Canonical не указан", "В HTML нет rel=canonical", "Проверьте, есть ли дубли URL; отсутствие тега само по себе не является запретом индексации.")
+    for alternate in parser.alternates:
+        lang, href = alternate['lang'], alternate['href']
+        if lang != 'x-default' and not re.fullmatch(r'[a-z]{2,3}(?:-[a-z]{4})?(?:-(?:[a-z]{2}|[0-9]{3}))?', lang):
+            issue('hreflang_format', 'warning', 'Проверьте формат hreflang', lang, 'Используйте код языка с необязательным регионом или x-default. Проверяется форма кода, не полный реестр ISO.')
+        try:
+            if not href.startswith(('https://', 'http://')):
+                raise ValueError('Hreflang URL must be absolute')
+            page['hreflang'].append({'lang': lang, 'url': normalize_url(href)})
+        except ValueError:
+            issue('hreflang_url', 'warning', 'Некорректный адрес hreflang', href, 'Укажите полный HTTP/HTTPS URL языковой версии.')
     if parser.images_without_alt:
         issue("alt_missing", "warning", "У изображений отсутствует alt", " | ".join(parser.images_without_alt[:20]), "Добавьте описание значимым изображениям, декоративным — пустой alt.")
     page['schema'] = []
@@ -172,6 +188,8 @@ def analyze(response, site_origin):
 def findings(run):
     pages = run["pages"]
     issues = list(run.get("site_issues", [])) + [i for p in pages for i in p["issues"]]
+    from .technical import relationship_findings
+    issues.extend(relationship_findings(run))
     by_url = {p["url"]: p for p in pages}
     for field, label in (("title", "title"), ("description", "meta description"), ("content_hash", "текста HTML")):
         groups = defaultdict(list)
@@ -207,7 +225,7 @@ def compare(current, previous):
     def comparable(key):
         if key[0] not in common:
             return False
-        if key[1].startswith("duplicate_") or key[1] == "broken_internal_link":
+        if key[1].startswith(('duplicate_', 'canonical_target', 'canonical_chain', 'canonical_cycle', 'hreflang_', 'sitemap_')) or key[1] == "broken_internal_link":
             return old_urls <= checked_new
         return True
     return {"previous_id": previous["id"], "common_pages": len(common),

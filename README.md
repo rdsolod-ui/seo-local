@@ -35,6 +35,13 @@ separately from SQLite. Interrupted audits are marked failed on restart.
 
 - Projects, SQLite, crawl history, pause/resume and scope limits (up to 500 URLs).
 - robots.txt, sitemap discovery, metadata, headings, links, duplicate content.
+- Canonical targets, chains/cycles; hreflang return links and conflicts; Sitemap
+  duplicate, redirect, HTTP-error, noindex and noncanonical URL checks. Unvisited
+  targets remain explicitly unchecked. Source HTML only, same-origin crawl.
+- Bounded retries for 429/502/503/504 and transport failures, Retry-After support,
+  retained queue and resumable pause when the site requires a longer wait.
+- Bold local Cyrillic fonts, GSAP entrance/section motion, live reduced-motion
+  support. All interface assets are bundled; no CDN or analytics requests.
 - Offline Schema.org 30.1: 939 types, 1538 properties; nested JSON-LD and @graph,
   multiple types, inherited property domains, object ranges, duplicate keys,
   syntax and structural checks, precise JSON paths.

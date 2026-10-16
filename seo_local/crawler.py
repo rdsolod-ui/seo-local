@@ -52,11 +52,14 @@ class Engine:
         run = self.store.run(key)
         if run["status"] != "paused":
             raise ValueError("Продолжить можно только приостановленную проверку")
+        if run.get('retry_at', 0) > time.time():
+            raise ValueError(f"Сайт просит подождать ещё {int(run['retry_at']-time.time())+1} сек. (Retry-After)")
         self._launch(run)
         return key
 
     def _work(self, run, stop):
         net = Network(self.allow_loopback, delay=run["delay"])
+        net.stop = stop
         site = origin(run["url"])
         started = time.monotonic()
 
@@ -70,12 +73,21 @@ class Engine:
                 run["pending"].append(url)
 
         def site_issue(code, title, evidence):
-            run["site_issues"] = [i for i in run["site_issues"] if i["code"] != code]
+            run["site_issues"] = [i for i in run["site_issues"] if (i["code"], i['evidence']) != (code, evidence)][-199:]
             run["site_issues"].append({"code": code, "severity": "info", "title": title, "url": site,
                                        "evidence": evidence, "action": "Проверьте вручную. Отсутствие данных не считается успешной проверкой."})
 
+        def deferred(response):
+            if response.get('retry_at') or response.get('retry_interrupted'):
+                run['status'] = 'paused'
+                run['retry_at'] = response.get('retry_at', 0)
+                run['message'] = f"Пауза: HTTP {response['status']}, попыток {response.get('attempts', 1)}. Адрес сохранён в очереди; учитывается Retry-After."
+                return True
+            return False
+
         try:
             rob = net.fetch(site + "/robots.txt", site)
+            if deferred(rob): return
             run["robots_status"] = rob["status"]
             if rob.get("error") or rob["status"] >= 500 or rob["status"] in (401, 403, 429) or rob.get("truncated"):
                 raise ValueError("robots.txt недоступен; обход остановлен: " + (rob.get("error") or str(rob["status"])))
@@ -90,28 +102,49 @@ class Engine:
                 sitemap_queue = (robots.sitemaps or [site + "/sitemap.xml"])[:5]
                 visited_maps = set()
                 run["sitemap_urls"] = []
+                run['sitemaps'] = []
                 while sitemap_queue and len(visited_maps) < 5 and not stop.is_set():
-                    sm_url = normalize_url(sitemap_queue.pop(0))
+                    raw_sm = sitemap_queue.pop(0)
+                    try:
+                        sm_url = normalize_url(raw_sm)
+                    except ValueError:
+                        site_issue('sitemap_url_invalid', 'Некорректный адрес Sitemap', raw_sm)
+                        continue
                     if origin(sm_url) != site or sm_url in visited_maps:
                         continue
                     visited_maps.add(sm_url)
                     sm = net.fetch(sm_url, site)
+                    if deferred(sm): return
+                    run['sitemaps'].append({'url': sm_url, 'status': sm['status'], 'error': sm.get('error', '')})
                     if sm["status"] != 200 or sm.get("error") or sm.get("truncated"):
                         site_issue("sitemap_unavailable", "Sitemap не прочитан полностью", sm_url + ": " + (sm.get("error") or str(sm["status"])))
                         continue
                     try:
                         root = ET.fromstring(sm["body"])
-                        locs = [e.text.strip() for e in root.iter() if e.tag.split("}")[-1] == "loc" and e.text][:5000]
+                        locs = [e.text.strip() for child in root for e in child if e.tag.split("}")[-1] == "loc" and e.text]
+                        if len(locs) > 5000:
+                            site_issue('sitemap_limit', 'Sitemap прочитан частично', sm_url + ': первые 5000 адресов')
+                        locs = locs[:5000]
                         if root.tag.split("}")[-1] == "sitemapindex":
                             sitemap_queue.extend(locs[:5])
                         elif root.tag.split("}")[-1] == "urlset":
                             for loc in locs:
-                                add(loc)
-                                run["sitemap_urls"].append(loc)
+                                try:
+                                    if not loc.startswith(('https://', 'http://')):
+                                        raise ValueError('Absolute URL required')
+                                    normalized = normalize_url(loc)
+                                    add(normalized)
+                                    run["sitemap_urls"].append(normalized)
+                                    if origin(normalized) != site:
+                                        site_issue('sitemap_external', 'Адрес Sitemap за пределами origin', normalized)
+                                except ValueError:
+                                    site_issue('sitemap_invalid_loc', 'Некорректный loc в Sitemap', loc)
                         else:
                             site_issue("sitemap_format", "Ответ не является XML Sitemap", sm_url)
                     except ET.ParseError as exc:
                         site_issue("sitemap_parse", "Ошибка XML Sitemap", str(exc))
+                if sitemap_queue:
+                    site_issue('sitemap_maps_limit', 'Проверены не все Sitemap', 'Лимит: 5 файлов; оставшиеся карты не проверены.')
                 run["prepared"] = not stop.is_set()
                 self.store.save_run(run)
             while run["pending"] and len(run["pages"]) < run["limit"]:
@@ -121,9 +154,12 @@ class Engine:
                     break
                 url = run["pending"][0]
                 response = net.fetch(url, site)
+                if deferred(response): break
                 page = analyze(response, site)
                 run["pages"].append(page)
                 run["pending"].pop(0)
+                for target in page.get('canonical', []) + [a['url'] for a in page.get('hreflang', [])]:
+                    add(target)
                 for link in page.get("links", []):
                     if link["internal"] and link["follow"]:
                         add(link["url"])

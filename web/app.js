@@ -13,6 +13,7 @@ async function api(path, data) {
 }
 async function action(button, fn) { button.disabled=true; try {await fn();} catch(e){message(e.message,true);} finally{button.disabled=button.id==='start'&&run?.status==='running';} }
 function projectNav(){
+  $('project-count').textContent=projects.length;
   $('projects').innerHTML=projects.map(p=>`<button type="button" data-project="${esc(p.id)}" ${project?.id===p.id?'aria-current="page"':''}>${esc(p.name)}<small>${esc(p.url)}</small></button>`).join('');
   $('projects').querySelectorAll('button').forEach(b=>b.onclick=()=>selectProject(b.dataset.project));
 }
@@ -20,7 +21,8 @@ async function selectProject(id){
   const ticket=++generation;clearTimeout(pollTimer);project=projects.find(p=>p.id===id);run=null;runId='';
   if(!project)return;
   $('welcome').hidden=true;$('project-view').hidden=false;$('project-title').textContent=project.name;$('project-url').textContent=project.url;$('project-url').href=project.url;
-  $('result').hidden=true;$('no-runs').hidden=false;$('imports').innerHTML='';$('severity').value='all';$('search').value='';projectNav();
+  $('result').hidden=true;$('no-runs').hidden=false;$('imports').innerHTML='';$('severity').value='all';$('search').value='';$('rule-family').value='all';$('lh-url').value=project.url;projectNav();
+  document.dispatchEvent(new CustomEvent('seo:change',{detail:'project-view'}));
   try{await Promise.all([loadHistory(ticket),loadImports(ticket)]);}catch(e){message(e.message,true);}
 }
 async function loadHistory(ticket=generation){
@@ -43,20 +45,23 @@ function renderRun(){
   for(const format of ['html','csv','json'])$(format+'-export').href=`${base}api/export?id=${run.id}&format=${format}`;
   $('pages-title').textContent=`Проверенные адреса (${run.pages.length}) · в очереди ${s.pending}`;
   $('pages').innerHTML=run.pages.map(p=>`<tr><td><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.url)}</a>${p.error?`<p>${esc(p.error)}</p>`:''}</td><td>${p.status||'—'}</td><td>${esc(p.title||'—')}</td><td>${esc(p.h1?.join(' / ')||'—')}</td></tr>`).join('');
+  const checked=new Set(run.pages.filter(p=>!p.error&&!p.blocked&&!p.truncated&&p.status).map(p=>p.url));
+  const maps=[...new Set(run.sitemap_urls||[])];
+  $('coverage').textContent=`Охват Sitemap: ${maps.filter(u=>checked.has(u)).length} из ${maps.length} прочитанных адресов проверено. Внешние и не посещённые цели отмечены отдельно.`;
   renderIssues();
 }
-function renderIssues(){if(!run)return;const filter=$('severity').value,q=$('search').value.toLowerCase();const list=run.issues.filter(i=>(filter==='all'||i.severity===filter)&&`${i.url} ${i.title} ${i.code} ${i.evidence}`.toLowerCase().includes(q));
+function renderIssues(){if(!run)return;const filter=$('severity').value,q=$('search').value.toLowerCase();const family=$('rule-family').value;const list=run.issues.filter(i=>(family==='all'||i.code.startsWith(family)||family==='schema'&&i.code.startsWith('jsonld'))&&(filter==='all'||i.severity===filter)&&`${i.url} ${i.title} ${i.code} ${i.evidence}`.toLowerCase().includes(q));
   $('issues').innerHTML=list.length?list.map(i=>`<article class="issue"><span class="badge ${i.severity}">${severityLabel[i.severity]}</span><div><h3>${esc(i.title)}</h3><a class="issue-url" href="${esc(i.url)}" target="_blank" rel="noopener noreferrer">${esc(i.url)}</a><div class="evidence">${esc(i.evidence)}</div><p class="action">${esc(i.action)}</p></div></article>`).join(''):'<p class="empty">По выбранному фильтру замечаний нет. Проверьте охват и ошибки загрузки.</p>';
 }
 async function loadImports(ticket=generation){const data=await api('/api/imports?project='+project.id);if(ticket!==generation)return;
   $('imports').innerHTML=data.map(r=>`<article class="import-record"><strong>${esc(r.start)} — ${esc(r.end)}</strong><p>${r.summary.rows} строк · ${r.summary.clicks} кликов · ${r.summary.impressions} показов · CTR ${r.summary.ctr===null?'—':(r.summary.ctr*100).toFixed(2)+'%'} · средняя позиция ${r.summary.position===null?'—':r.summary.position.toFixed(2)}</p><p class="hint">${esc(r.note)}</p></article>`).join('');
 }
-$('project-form').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;action(form.querySelector('button'),async()=>{const f=new FormData(form);const p=await api('/api/projects',{name:f.get('name'),url:f.get('url')});projects=await api('/api/projects');form.reset();$('new-project').open=false;await selectProject(p.id);message('Проект добавлен. Можно запустить проверку.');});};
+$('project-form').onsubmit=e=>{e.preventDefault();const form=e.currentTarget;action(form.querySelector('button'),async()=>{const f=new FormData(form);const p=await api('/api/projects',{name:f.get('name'),url:f.get('url')});projects=await api('/api/projects');form.reset();$('new-project').open=false;await selectProject(p.id);$('audit').scrollIntoView({block:'start'});message('Проект добавлен. Можно запустить проверку.');});};
 $('run-form').onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget);action($('start'),async()=>{const result=await api('/api/start',{project:project.id,limit:Number(f.get('limit')),delay:Number(f.get('delay'))});runId=result.id;await loadHistory();message('Проверка запущена. Результаты сохраняются после каждого адреса.');});};
 $('pause').onclick=()=>action($('pause'),async()=>{const r=await api('/api/pause',{id:runId});message(r.message);});
 $('resume').onclick=()=>action($('resume'),async()=>{await api('/api/resume',{id:runId});await loadRun();});
 $('history').onchange=()=>{runId=$('history').value;loadRun().catch(e=>message(e.message,true));};
-$('severity').onchange=renderIssues;$('search').oninput=renderIssues;
+$('rule-family').onchange=renderIssues;$('severity').onchange=renderIssues;$('search').oninput=renderIssues;
 $('import-form').onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget);action(e.currentTarget.querySelector('button'),async()=>{const file=f.get('file');if(file.size>5000000)throw new Error('CSV должен быть меньше 5 МБ');const csv=await file.text();await api('/api/import',{project:project.id,csv,start:f.get('from'),end:f.get('to')});await loadImports();message('CSV импортирован. Показаны итоги строк выгрузки.');});};
 $('backup').onclick=()=>action($('backup'),async()=>{const r=await api('/api/backup',{});message('Резервная копия сохранена: '+r.path);});
 $('shutdown').onclick=()=>action($('shutdown'),async()=>{await api('/api/shutdown',{});clearTimeout(pollTimer);message('Приложение остановлено. Для запуска используйте start.cmd.');document.querySelectorAll('button,input,select').forEach(e=>e.disabled=true);});
@@ -73,3 +78,5 @@ async function loadLighthouse(id){
 $('lh-form').onsubmit=e=>{e.preventDefault();action($('lh-start'),async()=>{const r=await api('/api/lighthouse/start',{url:$('lh-url').value,mode:$('lh-mode').value});sessionStorage.setItem('seo-lighthouse-id',r.id);await loadLighthouse(r.id);});};
 $('lh-import').onclick=()=>action($('lh-import'),async()=>{const f=$('lh-file').files[0];if(!f||f.size>5000000)throw new Error('Выберите JSON до 5 МБ');const r=await api('/api/lighthouse/import',{report:JSON.parse(await f.text())});sessionStorage.setItem('seo-lighthouse-id',r.id);await loadLighthouse(r.id);});
 const lastLighthouse=sessionStorage.getItem('seo-lighthouse-id');if(lastLighthouse)loadLighthouse(lastLighthouse).catch(()=>sessionStorage.removeItem('seo-lighthouse-id'));
+
+$('focus-project').onclick=()=>{$('new-project').open=true;$('new-project').scrollIntoView({block:'center'});$('project-form').elements.name.focus({preventScroll:true});};

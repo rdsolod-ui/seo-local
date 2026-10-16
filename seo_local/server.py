@@ -24,7 +24,7 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
     lighthouse = Lighthouse(data_dir)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "SEOLocal/0.2"
+        server_version = "SEOLocal/0.3"
         timeout = 20
 
         def log_message(self, fmt, *args):
@@ -72,7 +72,7 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
             query = parse_qs(urlsplit(self.path).query)
             try:
                 if path == "/api/health":
-                    self.send({"app": "SEO Local", "version": "0.2.0", "paid_services": False})
+                    self.send({"app": "SEO Local", "version": "0.3.0", "paid_services": False})
                 elif path == "/api/session":
                     self.send({"token": token, "hosted": bool(public_origin), "lighthouse": lighthouse.capability()})
                 elif path == "/api/lighthouse":
@@ -100,9 +100,12 @@ def make_server(port, data_dir, allow_loopback=False, public_origin=None):
                         self.send(run, filename=f"seo-{run['id'][:8]}.json")
                     else:
                         self.send(export_html(run, store.project(run["project_id"])), content_type="text/html; charset=utf-8", filename=f"seo-{run['id'][:8]}.html")
-                elif path in ("/", "/app.js", "/style.css"):
+                elif path in ("/", "/app.js", "/style.css", "/motion.js"):
                     file = ROOT / "web" / ("index.html" if path == "/" else path[1:])
                     self.send(file.read_bytes(), content_type=(mimetypes.guess_type(file)[0] or "text/plain") + "; charset=utf-8")
+                elif path.startswith('/assets/') and path[8:] in {p.name for p in (ROOT / 'web' / 'assets').iterdir() if p.is_file()}:
+                    file = ROOT / 'web' / 'assets' / path[8:]
+                    self.send(file.read_bytes(), content_type=mimetypes.guess_type(file)[0] or 'application/octet-stream')
                 else:
                     self.send({"error": "Не найдено"}, 404)
             except (ValueError, KeyError) as exc:

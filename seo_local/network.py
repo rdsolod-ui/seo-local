@@ -5,6 +5,8 @@ import re
 import socket
 import ssl
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 AGENT = "SEOLocal/0.1"
@@ -40,6 +42,7 @@ class Network:
         self.delay = delay
         self.last = 0.0
         self.guard = None
+        self.stop = None
 
     def addresses(self, host, port):
         answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -52,7 +55,38 @@ class Network:
                 raise ValueError("Локальные, служебные и частные IP запрещены для обхода")
         return ips
 
+    @staticmethod
+    def retry_delay(value, fallback):
+        try:
+            if str(value).strip().isdigit():
+                return max(0, int(value))
+            moment = parsedate_to_datetime(value)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            return max(0, (moment - datetime.now(timezone.utc)).total_seconds())
+        except (ValueError, TypeError, OverflowError):
+            return fallback
+
     def fetch(self, url, allowed_origin, max_redirects=5):
+        for attempt in range(1, 4):
+            response = self._fetch(url, allowed_origin, max_redirects)
+            response['attempts'] = attempt
+            transient = response['status'] in (429, 502, 503, 504) or response.get('retryable')
+            if not transient or response.get('blocked'):
+                return response
+            delay = self.retry_delay(response.get('headers', {}).get('retry-after'), 2 ** attempt)
+            if attempt == 3 or delay > 15:
+                response['retry_at'] = time.time() + max(delay, 2)
+                return response
+            if self.stop:
+                if self.stop.wait(delay):
+                    response['retry_interrupted'] = True
+                    return response
+            else:
+                time.sleep(delay)
+        return response
+
+    def _fetch(self, url, allowed_origin, max_redirects=5):
         current = normalize_url(url)
         chain = []
         start = time.monotonic()
@@ -103,7 +137,7 @@ class Network:
                         "redirects": chain, "body": body, "bytes": len(raw), "truncated": too_large,
                         "elapsed_ms": round((time.monotonic() - start) * 1000), "error": ""}
             except (OSError, ValueError, http.client.HTTPException) as exc:
-                return {"url": url, "final_url": current, "status": 0, "headers": {}, "redirects": chain, "body": "", "error": str(exc)}
+                return {"url": url, "final_url": current, "status": 0, "headers": {}, "redirects": chain, "body": "", "error": str(exc), "retryable": isinstance(exc, (OSError, http.client.HTTPException))}
             finally:
                 if conn:
                     conn.close()
